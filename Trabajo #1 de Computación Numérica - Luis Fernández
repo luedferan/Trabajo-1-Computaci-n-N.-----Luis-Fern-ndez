@@ -1,0 +1,180 @@
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime
+import pytz
+from pvlib import location, solarposition, irradiance, pvsystem, temperature
+
+# --- Solar Simulation Application ---
+
+# This script simulates the energy production of a photovoltaic (PV) system for a specific location and date.
+# It calculates solar position and irradiance, then estimates the power output of a solar panel.
+# The results are visualized through a series of plots.
+
+# --- How to Run the Application ---
+
+# 1. Dependencies:
+#    This application requires the following Python libraries. Install them using pip:
+#    pip install pandas numpy matplotlib pvlib pytz
+
+# 2. Execution:
+#    Run the script from your terminal. The program will prompt you to enter the required
+#    parameters for the simulation.
+
+# --- Input Parameters ---
+
+# The application requests the following user inputs:
+# - Location name (e.g., 'Sahagún')
+# - Latitude and Longitude in decimal degrees (e.g., 8.94617 and -75.44275)
+# - GMT offset (e.g., '-5' for GMT-5)
+# - Date for the simulation in YYYY-MM-DD format (e.g., '2025-09-05')
+# - Panel tilt angle in degrees (e.g., '25')
+# - Panel azimuth angle in degrees (0 for North, 180 for South)
+
+# --- Code Start ---
+
+print("Enter the following data to start the simulation")
+
+try:
+    # Get user inputs for the simulation
+    nombre_ubicacion = input("\nEnter the name of the location, e.g., 'Sahagún': ")
+    lat = float(input("Enter latitude in degrees, e.g., '8.94617': "))
+    lon = float(input("Enter longitude in degrees, e.g., '-75.44275': "))
+    gmt_offset_str = input("Enter GMT offset, e.g., '+4' for GMT+4, '-2' for GMT-2: ")
+    fecha_simulacion_str = input("Enter the simulation date in Year-Month-Day format, e.g., '2025-09-05': ")
+    inclinacion_panel = float(input("Enter the panel tilt angle in degrees, e.g., '25': "))
+    acimut_panel = float(input("Finally, enter the panel azimuth angle in degrees, between '0' for north and '180' for south: "))
+
+    # Define fixed properties of the PV panel
+    eficiencia_panel = 0.20
+    area_panel_m2 = 1.6
+    coef_temp_panel = -0.004
+
+    # Convert GMT offset to an IANA time zone string
+    try:
+        gmt_offset_int = int(gmt_offset_str)
+        if gmt_offset_int >= 0:
+            tz = f'Etc/GMT-{gmt_offset_int}'
+        else:
+            tz = f'Etc/GMT+{-gmt_offset_int}'
+        
+        pytz.timezone(tz)
+    except (ValueError, pytz.UnknownTimeZoneError):
+        tz = 'America/Bogota'
+        print(f"Warning: The GMT offset '{gmt_offset_str}' is not a valid format. Using 'America/Bogota' by default.")
+
+    # Convert the input date string to a datetime object
+    try:
+        fecha_simulacion = datetime.strptime(fecha_simulacion_str, '%Y-%m-%d').date()
+    except ValueError:
+        try:
+            fecha_simulacion = datetime.strptime(fecha_simulacion_str, '%Y/%m/%d').date()
+        except ValueError:
+            try:
+                fecha_simulacion = datetime.strptime(fecha_simulacion_str, '%Y.%m.%d').date()
+            except ValueError:
+                raise ValueError("Invalid date format. Use Year-Month-Day")
+
+    # Create a time range for the simulation (1-minute intervals)
+    tiempos = pd.date_range(fecha_simulacion, periods=24 * 60, freq='1min', tz=tz)
+
+    # Create a location object and calculate solar position for the entire day
+    loc = location.Location(lat, lon, tz=tz, name=nombre_ubicacion)
+    posicion_solar = loc.get_solarposition(tiempos)
+
+    # Filter data to only include times when the sun is above the horizon
+    posicion_solar = posicion_solar[posicion_solar['elevation'] > 0].copy()
+    tiempos_sol_arriba = posicion_solar.index
+
+    # Calculate clearsky solar irradiance (DNI, GHI, DHI)
+    cielo_despejado = loc.get_clearsky(tiempos_sol_arriba, model='ineichen')
+
+    # Calculate total irradiance on the tilted panel's plane (POA)
+    irradiancia_poa_total = irradiance.get_total_irradiance(
+        inclinacion_panel, acimut_panel,
+        posicion_solar['apparent_zenith'], posicion_solar['azimuth'],
+        cielo_despejado['dni'], cielo_despejado['ghi'], cielo_despejado['dhi'],
+        model='isotropic'
+    )
+    irradiancia_poa_total.rename(columns={'poa_global': 'POA_Global'}, inplace=True)
+
+    # Simulate energy production of the panel
+    temp_celula = temperature.pvsyst_cell(irradiancia_poa_total['POA_Global'], temp_air=25)
+
+    # Calculate power output and total energy
+    potencia_salida_kw = (irradiancia_poa_total['POA_Global'] * area_panel_m2 * eficiencia_panel) / 1000
+    potencia_salida_ajustada = potencia_salida_kw * (1 + coef_temp_panel * (temp_celula - 25))
+    potencia_salida_ajustada[potencia_salida_ajustada < 0] = 0
+
+    # Convert power to daily energy (kWh)
+    energia_kwh = potencia_salida_ajustada.sum() * (1 / 60)
+
+    # Display the final simulation result
+    print(f"\nLa producción de energía que se calculó con los datos de la simulación para la fecha dada fue: {energia_kwh:.2f} kWh")
+
+    # --- Data Visualization ---
+    
+    # Configure subplots for a 4-part visualization
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, sharex=True, figsize=(10, 16))
+
+    # Plot solar elevation angle
+    posicion_solar['elevation'].plot(ax=ax1, title=f'Solar Elevation Angle in {nombre_ubicacion}', ylabel='Solar Elevation (degrees)', color='orange')
+    ax1.grid(True)
+    ax1.fill_between(posicion_solar.index, 0, posicion_solar['elevation'], color='gold', alpha=0.3)
+    ax1.set_ylim(bottom=0)
+
+    # Add a vertical line for solar noon (the highest point of the sun)
+    mediodia_solar_tiempo = posicion_solar['elevation'].idxmax()
+    ax1.axvline(x=mediodia_solar_tiempo, color='red', linestyle='--', label='Solar Zenith')
+    ax1.legend()
+    ax1.set_xlabel('Time of Day')
+
+    # Plot solar azimuth angle
+    posicion_solar['azimuth'].plot(ax=ax2, title=f'Solar Azimuth Angle in {nombre_ubicacion}', ylabel='Solar Azimuth (degrees)', color='forestgreen')
+    ax2.grid(True)
+    ax2.set_xlabel('Time of Day')
+    ax2.axvline(x=mediodia_solar_tiempo, color='red', linestyle='--', label='Solar Zenith')
+    ax2.legend()
+    ax2.fill_between(posicion_solar.index, 0, posicion_solar['azimuth'], color='lightgreen', alpha=0.4)
+
+    # Plot total solar irradiance on the panel
+    irradiancia_poa_total['POA_Global'].plot(ax=ax3, title=f'Solar Irradiance on the Panel in {nombre_ubicacion}', ylabel='Irradiance on the Panel $(W/m^2)$', color='purple')
+    ax3.grid(True)
+    ax3.fill_between(irradiancia_poa_total.index, 0, irradiancia_poa_total['POA_Global'], color='pink', alpha=0.3)
+    ax3.set_ylim(bottom=0)
+    ax3.axvline(x=mediodia_solar_tiempo, color='red', linestyle='--', label='Solar Zenith')
+    ax3.legend()
+    ax3.set_xlabel('Time of Day')
+
+    # Plot estimated energy production
+    potencia_salida_ajustada.plot(ax=ax4, title=f'Estimated Energy Production of the PV Panel in {nombre_ubicacion}', ylabel='Power (kW)', color='blue')
+    ax4.grid(True)
+    ax4.set_xlabel('Time of Day')
+    ax4.fill_between(potencia_salida_ajustada.index, 0, potencia_salida_ajustada, color='lightblue', alpha=0.3)
+    ax4.set_ylim(bottom=0)
+    ax4.axvline(x=mediodia_solar_tiempo, color='red', linestyle='--', label='Solar Zenith')
+
+    # Add text to the final plot showing total daily energy
+    ax4.text(0.5, 0.9, f'Total Energy: {energia_kwh:.2f} kWh', transform=ax4.transAxes, fontsize=12, fontweight='bold', ha='center', va='top')
+    ax4.legend(loc='upper left')
+
+    # Set time formatting for the x-axis on all plots
+    for ax in [ax1, ax2, ax3, ax4]:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        ax.set_xlabel('Time of Day')
+
+    # Adjust layout and display the plots
+    plt.tight_layout()
+    plt.show()
+
+# --- Error Handling ---
+
+except pytz.UnknownTimeZoneError:
+    print("\nTime zone error! Please make sure you use a valid GMT offset.")
+except ValueError as e:
+    print(f"\nInvalid input! {e}")
+except Exception as e:
+    print(f"\nAn error occurred: {e}")
